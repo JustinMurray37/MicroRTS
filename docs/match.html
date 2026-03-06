@@ -555,10 +555,31 @@ python3 tournament/match_server.py --port 8080</code></pre>
 
         // State
         var agentsData = {};      // class -> info
-        var matchHistory = [];    // [{ai1, ai2, winner, ...}]
+        var matchHistory = loadHistory(); // [{ai1, ai2, winner, ...}]
         var currentMatchId = null;
         var pollTimer = null;
         var serverOnline = false;
+
+        function loadHistory() {
+            try {
+                var raw = localStorage.getItem('microrts_match_history');
+                if (raw) {
+                    var arr = JSON.parse(raw);
+                    // Restore Date objects from ISO strings
+                    for (var i = 0; i < arr.length; i++) {
+                        if (arr[i]._timestamp) arr[i]._timestamp = new Date(arr[i]._timestamp);
+                    }
+                    return arr;
+                }
+            } catch (e) {}
+            return [];
+        }
+
+        function saveHistory() {
+            try {
+                localStorage.setItem('microrts_match_history', JSON.stringify(matchHistory));
+            } catch (e) {}
+        }
 
         // DOM refs
         var serverUrlInput = document.getElementById('server-url');
@@ -978,6 +999,7 @@ python3 tournament/match_server.py --port 8080</code></pre>
             match._timestamp = new Date();
             matchHistory.unshift(match);
             if (matchHistory.length > 20) matchHistory.pop();
+            saveHistory();
             renderHistory();
         }
 
@@ -1303,6 +1325,8 @@ python3 tournament/match_server.py --port 8080</code></pre>
         ai2Select.value = 'ai.RandomBiasedAI';
         updateDesc('ai1');
         updateDesc('ai2');
+        // Render any previously saved match history
+        renderHistory();
         // Try to connect to server (will override with full agent/map list if available)
         checkServer();
         // Re-check periodically
