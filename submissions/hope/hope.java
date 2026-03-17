@@ -2,6 +2,7 @@ package ai.abstraction.submissions.hope;
 
 import ai.abstraction.AbstractionLayerAI;
 import ai.abstraction.WorkerRush;
+import ai.abstraction.WorkerRushPlusPlus;
 import ai.abstraction.LightRush;
 import ai.abstraction.HeavyRush;
 import ai.abstraction.RangedRush;
