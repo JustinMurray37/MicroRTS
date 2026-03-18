@@ -29,7 +29,9 @@ public class NickMCTS extends NaiveMCTS {
     private int lastUpdateFrame = -1;
 
     public NickMCTS(UnitTypeTable utt) {
-        // Deep search (50) and low exploration (0.02) to ensure it commits to an attack path
+        /* - Search Depth: 50 (to see the victory condition)
+           - Epsilon: 0.02f (to reduce random wandering)
+        */
         super(160, -1, 100, 50, 0.02f, 0.0f, 0.4f,
               new WorkerRush(utt), 
               new MyEvaluation(utt, null), 
@@ -40,8 +42,8 @@ public class NickMCTS extends NaiveMCTS {
 
     @Override
     public PlayerAction getAction(int player, GameState gs) throws Exception {
-        // Frequency increased to every 200 frames for more responsive tactical shifts
-        if (gs.getTime() % 200 == 0 && gs.getTime() != lastUpdateFrame) {
+        // Update strategy every 200 frames for responsiveness
+        if (gs != null && gs.getTime() % 200 == 0 && gs.getTime() != lastUpdateFrame) {
             lastUpdateFrame = gs.getTime();
             controller.updateStrategy(gs, player);
         }
@@ -63,10 +65,10 @@ class StrategyController {
     private static final String OLLAMA_HOST = System.getenv().getOrDefault("OLLAMA_HOST", "http://localhost:11434");
     private static final String OLLAMA_MODEL = System.getenv().getOrDefault("OLLAMA_MODEL", "llama3.1:8b");
     
-    public volatile float aggression = 1.2f; // Default slightly aggressive
+    public volatile float aggression = 1.2f;
     public volatile float threatWeight = 0.8f; 
     public volatile float resourceWeight = 0.15f;
-    public volatile float offensiveWeight = 0.8f; 
+    public volatile float offensiveWeight = 1.0f; 
 
     private final HttpClient client = HttpClient.newBuilder()
             .connectTimeout(Duration.ofMillis(800))
@@ -74,9 +76,9 @@ class StrategyController {
     private final Gson gson = new Gson();
 
     public void updateStrategy(GameState gs, int player) {
-        String stateSummary = summarizeState(gs, player);
+        if (gs == null) return;
         
-        // REFINED PROMPT: Encourages breaking stalemates by identifying when we have the advantage
+        String stateSummary = summarizeState(gs, player);
         String prompt = "MicroRTS Battle Context: " + stateSummary + 
                         ". Task: Break the draw. If Me > En, set agg > 2.0 and off > 1.5. " +
                         "If En > Me, set thr > 3.0. Respond ONLY JSON: " +
@@ -113,7 +115,7 @@ class StrategyController {
     private int[] countUnits(GameState gs, int p) {
         int w=0, c=0, b=0, br=0;
         for (Unit u : gs.getUnits()) {
-            if (u.getPlayer() == p) {
+            if (u != null && u.getPlayer() == p && u.getType() != null) {
                 String n = u.getType().name;
                 if (n.equals("Worker")) w++;
                 else if (n.equals("Base")) b++;
@@ -127,14 +129,16 @@ class StrategyController {
     private void parseAndApply(String responseBody) {
         try {
             JsonObject topObj = JsonParser.parseString(responseBody).getAsJsonObject();
+            if (!topObj.has("response")) return;
+            
             String modelOutput = topObj.get("response").getAsString();
             JsonObject strategy = JsonParser.parseString(modelOutput).getAsJsonObject();
 
-            if (strategy.has("agg")) this.aggression = strategy.get("agg").getAsFloat();
-            if (strategy.has("thr")) this.threatWeight = strategy.get("thr").getAsFloat();
-            if (strategy.has("res")) this.resourceWeight = strategy.get("res").getAsFloat();
-            if (strategy.has("off")) this.offensiveWeight = strategy.get("off").getAsFloat();
-        } catch (Exception e) {}
+            if (strategy.has("agg") && strategy.get("agg").isJsonPrimitive()) this.aggression = strategy.get("agg").getAsFloat();
+            if (strategy.has("thr") && strategy.get("thr").isJsonPrimitive()) this.threatWeight = strategy.get("thr").getAsFloat();
+            if (strategy.has("res") && strategy.get("res").isJsonPrimitive()) this.resourceWeight = strategy.get("res").getAsFloat();
+            if (strategy.has("off") && strategy.get("off").isJsonPrimitive()) this.offensiveWeight = strategy.get("off").getAsFloat();
+        } catch (Exception e) { /* Fallback to existing weights */ }
     }
 }
 
@@ -149,28 +153,22 @@ class MyEvaluation extends LanchesterEvaluationFunction {
 
     @Override
     public float evaluate(int maxplayer, int minplayer, GameState gs) {
+        if (gs == null) return 0;
+
         float agg = (sc != null) ? sc.aggression : 1.2f;
         float thr = (sc != null) ? sc.threatWeight : 0.8f;
         float res = (sc != null) ? sc.resourceWeight : 0.15f;
-        float off = (sc != null) ? sc.offensiveWeight : 0.8f;
+        float off = (sc != null) ? sc.offensiveWeight : 1.0f;
 
-        // 1. Lanchester with Aggression Bias
-        // We multiply the score significantly if we are in an 'aggressive' state
         float baseScore = super.evaluate(maxplayer, minplayer, gs);
         if (baseScore > 0) baseScore *= agg; 
 
-        // 2. Global Offensive Pressure
-        // Constant pull toward the enemy to prevent "dancing" in place
         float offensiveBonus = calculateGlobalOffensiveBonus(maxplayer, gs) * off;
-        
-        // 3. Selective Threat Penalty
-        // Only care about threats if they are EXTREMELY close to home
         float threatPenalty = calculateThreat(maxplayer, gs, 0.02f) * thr;
         
-        // 4. Resource carrying
         float carryingBonus = 0;
         for (Unit u : gs.getUnits()) {
-            if (u.getPlayer() == maxplayer && u.getResources() > 0) {
+            if (u != null && u.getPlayer() == maxplayer && u.getResources() > 0) {
                 carryingBonus += res;
             }
         }
@@ -181,12 +179,13 @@ class MyEvaluation extends LanchesterEvaluationFunction {
     private float calculateThreat(int player, GameState gs, float weight) {
         float threatPenalty = 0.0f;
         PhysicalGameState pgs = gs.getPhysicalGameState();
+        if (pgs == null) return 0;
+
         for (Unit u : pgs.getUnits()) {
-            if (u.getPlayer() == player && u.getType().name.equals("Base")) {
+            if (u != null && u.getPlayer() == player && u.getType() != null && u.getType().name.equals("Base")) {
                 for (Unit e : pgs.getUnits()) {
-                    if (e.getPlayer() == 1 - player) {
+                    if (e != null && e.getPlayer() == 1 - player) {
                         int dist = Math.abs(u.getX() - e.getX()) + Math.abs(u.getY() - e.getY());
-                        // Reduced threat range (7) so it doesn't get scared too easily
                         if (dist < 7) threatPenalty += (7 - dist) * weight;
                     }
                 }
@@ -198,25 +197,26 @@ class MyEvaluation extends LanchesterEvaluationFunction {
     private float calculateGlobalOffensiveBonus(int player, GameState gs) {
         float bonus = 0;
         PhysicalGameState pgs = gs.getPhysicalGameState();
-        int mapDim = pgs.getWidth() + pgs.getHeight();
+        if (pgs == null) return 0;
         
+        int mapDim = pgs.getWidth() + pgs.getHeight();
         Unit enemyTarget = null;
+
         for (Unit u : pgs.getUnits()) {
-            if (u.getPlayer() == 1 - player) {
-                // Aim for the base first to force the win
+            if (u != null && u.getPlayer() == 1 - player && u.getType() != null) {
                 if (enemyTarget == null || u.getType().name.equals("Base")) {
                     enemyTarget = u;
                 }
             }
         }
 
-        if (enemyTarget != null) {
-            for (Unit u : pgs.getUnits()) {
-                if (u.getPlayer() == player && u.getType().canAttack) {
-                    int dist = Math.abs(u.getX() - enemyTarget.getX()) + Math.abs(u.getY() - enemyTarget.getY());
-                    // Higher reward for being close to the enemy base/units
-                    bonus += (mapDim - dist) * 0.15f; 
-                }
+        // Defensive check: If no enemy units remain, we've won or they are invisible
+        if (enemyTarget == null) return 0;
+
+        for (Unit u : pgs.getUnits()) {
+            if (u != null && u.getPlayer() == player && u.getType() != null && u.getType().canAttack) {
+                int dist = Math.abs(u.getX() - enemyTarget.getX()) + Math.abs(u.getY() - enemyTarget.getY());
+                bonus += (mapDim - dist) * 0.15f; 
             }
         }
         return bonus;
